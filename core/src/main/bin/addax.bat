@@ -30,6 +30,8 @@ if "%1" == "" goto usage
 set job_name=%~n1
 set job_escaped_name=%job_name:.=_%
 set curr_time=%date:~0,4%%date:~5,2%%date:~8,2%_%time:~0,2%%time:~3,2%%time:~6,2%
+:: Remove spaces from time (when hour < 10)
+set curr_time=%curr_time: =0%
 set LOG_FILE=addax_%job_escaped_name%_%curr_time%.log
 
 
