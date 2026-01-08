@@ -199,13 +199,13 @@ public class MongoDBWriter
             this.batchSize = writerSliceConfig.getInt(BATCH_SIZE, DEFAULT_BATCH_SIZE);
 
             // support wildcard column config: if COLUMN is exactly "*", we operate in wildcardMode
-            List<String> columnConf = writerSliceConfig.getList(COLUMN, String.class);
-            if (columnConf.size() == 1 && "*".equals(columnConf.get(0))) {
+            String columnStr = writerSliceConfig.getString(COLUMN);
+            if ("\"*\"".equals(columnStr) || "[\"*\"]".equals(columnStr)) {
                 this.wildcardMode = true;
                 this.mongodbColumnMeta = null;
             }
             else {
-                this.mongodbColumnMeta = JSON.parseArray(writerSliceConfig.getString(COLUMN));
+                this.mongodbColumnMeta = JSON.parseArray(columnStr);
             }
 
             this.writeMode = writerSliceConfig.getString(WRITE_MODE, "insert");
@@ -225,19 +225,65 @@ public class MongoDBWriter
         {
             MongoDatabase db = mongoClient.getDatabase(database);
             MongoCollection<BasicDBObject> col = db.getCollection(this.collection, BasicDBObject.class);
+
+            // Process nested document structure - expand document types into flat fields with parent tracking
+            JSONArray processedColumnMeta = null;
+            if (!this.wildcardMode && this.mongodbColumnMeta != null) {
+                processedColumnMeta = processColumnMeta(this.mongodbColumnMeta, "");
+            }
+
             List<Record> writerBuffer = new ArrayList<>(this.batchSize);
             Record record;
             while ((record = lineReceiver.getFromReader()) != null) {
                 writerBuffer.add(record);
                 if (writerBuffer.size() >= this.batchSize) {
-                    doBatchInsert(col, writerBuffer, mongodbColumnMeta);
+                    doBatchInsert(col, writerBuffer, processedColumnMeta);
                     writerBuffer.clear();
                 }
             }
             if (!writerBuffer.isEmpty()) {
-                doBatchInsert(col, writerBuffer, mongodbColumnMeta);
+                doBatchInsert(col, writerBuffer, processedColumnMeta);
                 writerBuffer.clear();
             }
+        }
+
+        /**
+         * Process column meta to handle document types with subDocument arrays.
+         * Expands nested document structures into flat fields with parent path tracking.
+         * Supports multi-level nesting.
+         *
+         * @param columnMeta original column meta configuration
+         * @param parentPath parent path prefix for nested fields (empty string for root level)
+         * @return processed column meta with expanded document types
+         */
+        private JSONArray processColumnMeta(JSONArray columnMeta, String parentPath)
+        {
+            JSONArray result = new JSONArray();
+            for (int i = 0; i < columnMeta.size(); i++) {
+                JSONObject colMeta = columnMeta.getJSONObject(i);
+                String name = colMeta.getString(KeyConstant.COLUMN_NAME);
+                String type = colMeta.getString(KeyConstant.COLUMN_TYPE);
+
+                if (KeyConstant.isDocumentType(type)) {
+                    // Handle document type - expand subDocument fields
+                    JSONArray subDoc = colMeta.getJSONArray(KeyConstant.SUB_DOCUMENT);
+                    if (subDoc != null && !subDoc.isEmpty()) {
+                        // Build the full path for this document
+                        String docPath = StringUtils.isEmpty(parentPath) ? name : parentPath + "." + name;
+                        // Recursively process subDocument to support multi-level nesting
+                        JSONArray expandedFields = processColumnMeta(subDoc, docPath);
+                        result.addAll(expandedFields);
+                    }
+                }
+                else {
+                    // Regular field - add parent path info
+                    JSONObject newMeta = new JSONObject();
+                    newMeta.putAll(colMeta);
+                    newMeta.put(KeyConstant.SUB_NAME, parentPath);
+                    result.add(newMeta);
+                }
+            }
+            return result;
         }
 
         private void doBatchInsert(MongoCollection<BasicDBObject> collection, List<Record> writerBuffer, JSONArray columnMeta)
@@ -303,18 +349,28 @@ public class MongoDBWriter
         {
             String type = meta.getString(KeyConstant.COLUMN_TYPE);
             String name = meta.getString(KeyConstant.COLUMN_NAME);
+            String subName = meta.getString(KeyConstant.SUB_NAME);
+
+            // Determine the full field path considering nested document structure
+            String fieldPath;
+            if (StringUtils.isNotBlank(subName)) {
+                fieldPath = subName + "." + name;
+            }
+            else {
+                fieldPath = name;
+            }
 
             if (StringUtils.isEmpty(column.asString())) {
                 // use helper to support nested dotted names
-                setNestedField(data, name, KeyConstant.isArrayType(type.toLowerCase()) ? new Object[0] : column.asString());
+                setNestedField(data, fieldPath, KeyConstant.isArrayType(type.toLowerCase()) ? new Object[0] : column.asString());
                 return;
             }
 
             if (column instanceof StringColumn) {
-                processStringColumn(column, type, name, meta, data);
+                processStringColumn(column, type, fieldPath, meta, data);
             }
             else {
-                processPrimitiveColumn(column, type, name, data);
+                processPrimitiveColumn(column, type, fieldPath, data);
             }
         }
 
@@ -323,6 +379,16 @@ public class MongoDBWriter
             try {
                 if (KeyConstant.isObjectIdType(type.toLowerCase())) {
                     setNestedField(data, name, new ObjectId(column.asString()));
+                }
+                else if (KeyConstant.isBinaryType(type.toLowerCase())) {
+                    // Handle Binary type: convert bytes to MongoDB Binary object
+                    byte[] bytes = column.asBytes();
+                    setNestedField(data, name, new org.bson.types.Binary(bytes));
+                }
+                else if (KeyConstant.isHexType(type.toLowerCase())) {
+                    // Handle Hex type: convert bytes to hex string (like SQL Server fn_varbintohexstr)
+                    byte[] bytes = column.asBytes();
+                    setNestedField(data, name, KeyConstant.bytesToHex(bytes));
                 }
                 else if (KeyConstant.isArrayType(type.toLowerCase())) {
                     String splitter = meta.getString(KeyConstant.COLUMN_SPLITTER);
@@ -371,6 +437,9 @@ public class MongoDBWriter
                 case "DOUBLE" -> setNestedField(data, name, column.asDouble());
                 case "BOOL" -> setNestedField(data, name, column.asBoolean());
                 case "BYTES" -> setNestedField(data, name, column.asBytes());
+                case "BINARY" -> setNestedField(data, name, new org.bson.types.Binary(column.asBytes()));
+                case "INT" -> setNestedField(data, name, column.asLong().intValue());
+                case "HEX" -> setNestedField(data, name, KeyConstant.bytesToHex(column.asBytes()));
                 default -> setNestedField(data, name, column.asString());
             }
         }

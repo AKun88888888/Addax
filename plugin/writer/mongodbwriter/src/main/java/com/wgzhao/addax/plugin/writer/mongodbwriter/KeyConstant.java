@@ -41,6 +41,16 @@ public class KeyConstant
 
     public static final String COLUMN_SPLITTER = "splitter";
 
+    public static final String DOCUMENT_TYPE = "document";
+
+    public static final String SUB_DOCUMENT = "subDocument";
+
+    public static final String SUB_NAME = "subName";
+
+    public static final String BINARY_TYPE = "binary";
+
+    public static final String HEX_TYPE = "hex";
+
     private KeyConstant() {}
 
     public static boolean isArrayType(String type)
@@ -51,6 +61,36 @@ public class KeyConstant
     public static boolean isObjectIdType(String type)
     {
         return OBJECT_ID_TYPE.equals(type);
+    }
+
+    public static boolean isDocumentType(String type)
+    {
+        return DOCUMENT_TYPE.equalsIgnoreCase(type);
+    }
+
+    public static boolean isBinaryType(String type)
+    {
+        return BINARY_TYPE.equalsIgnoreCase(type);
+    }
+
+    public static boolean isHexType(String type)
+    {
+        return HEX_TYPE.equalsIgnoreCase(type);
+    }
+
+    /**
+     * Convert byte array to hex string (uppercase, with 0x prefix like SQL Server fn_varbintohexstr)
+     */
+    public static String bytesToHex(byte[] bytes)
+    {
+        if (bytes == null || bytes.length == 0) {
+            return "0x";
+        }
+        StringBuilder sb = new StringBuilder("0x");
+        for (byte b : bytes) {
+            sb.append(String.format("%02X", b));
+        }
+        return sb.toString();
     }
 
 }
